@@ -6,3 +6,5 @@ logs/
 *.bin
 *.gguf
 runs/
+models/llama3-8b.gguf
+models/*/

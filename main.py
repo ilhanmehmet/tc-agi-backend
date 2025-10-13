@@ -7,6 +7,7 @@ from datetime import datetime
 from utils.translator import translate_text
 from utils.image_generator import generate_image
 from utils.llama_model import llama_model
+from utils.memory import memory
 
 app = FastAPI()
 
@@ -30,7 +31,12 @@ class ImageRequest(BaseModel):
 
 @app.get("/")
 def root():
-    return {"status": "TC-AGI Backend Running!", "version": "7.0", "ai": "Llama-3 8B Active"}
+    return {
+        "status": "TC-AGI Backend Running!", 
+        "version": "7.1", 
+        "ai": "Llama-3 8B + RAG Memory",
+        "knowledge_entries": len(memory.knowledge_base)
+    }
 
 @app.post("/api/v1/chat")
 def chat(request: ChatRequest):
@@ -39,12 +45,19 @@ def chat(request: ChatRequest):
     if session_id not in chat_sessions:
         chat_sessions[session_id] = []
     
-    # Build conversation context
-    context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_sessions[session_id][-5:]])
+    # RAG: Search relevant knowledge
+    relevant_knowledge = memory.search(request.query, k=3)
+    context = ""
+    if relevant_knowledge:
+        context = "Relevant knowledge:\n" + "\n".join([f"- {k['text']}" for k in relevant_knowledge]) + "\n\n"
     
-    # Create Llama-3 prompt
+    # Build conversation context
+    conv_context = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_sessions[session_id][-5:]])
+    
+    # Create Llama-3 prompt with RAG context
     llama_prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-You are TC-AGI, an advanced multilingual AI assistant. You are helpful, accurate, and ethical. Respond in {request.language} language.<|eot_id|>
+You are TC-AGI, an advanced multilingual AI assistant. You are helpful, accurate, and ethical. Respond in {request.language} language.
+{context}<|eot_id|>
 
 <|start_header_id|>user<|end_header_id|>
 {request.query}<|eot_id|>
@@ -59,6 +72,9 @@ You are TC-AGI, an advanced multilingual AI assistant. You are helpful, accurate
     if request.language != "en":
         ai_response = translate_text(ai_response, "en", request.language)
     
+    # Learn: Add to memory
+    memory.add_knowledge(f"Q: {request.query}\nA: {ai_response}", {"timestamp": datetime.now().isoformat()})
+    
     # Save to session
     chat_sessions[session_id].append({"role": "user", "content": request.query})
     chat_sessions[session_id].append({"role": "assistant", "content": ai_response})
@@ -66,7 +82,8 @@ You are TC-AGI, an advanced multilingual AI assistant. You are helpful, accurate
     return {
         "response": ai_response,
         "session_id": session_id,
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "rag_used": len(relevant_knowledge) > 0
     }
 
 @app.post("/api/v1/generate-image")

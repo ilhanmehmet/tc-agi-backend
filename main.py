@@ -1,81 +1,113 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
-import uuid
-from datetime import datetime
-from utils.translator import translate_text
-from utils.image_generator import generate_image
-from utils.llama_model import llama_model
-from utils.memory import memory
-from utils.web_search import web_searcher
+import uvicorn
+import os
+import logging
 
-app = FastAPI()
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
-chat_sessions = {}
+# TC-AGI Phoenix Core'u import et
+try:
+    from main_phoenix import PhoenixCore
+    from api.agi_api import router as agi_router
+    PHOENIX_AVAILABLE = True
+except ImportError as e:
+    print(f"Phoenix Core import hatası: {e}")
+    PHOENIX_AVAILABLE = False
 
+# Logging ayarla
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# API uygulamasını oluştur
+app = FastAPI(title="TC-AGI Phoenix API", version="2.0.0")
+
+# CORS ayarları
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Phoenix Core initialization
+phoenix_core = None
+if PHOENIX_AVAILABLE:
+    try:
+        phoenix_core = PhoenixCore()
+        logger.info("TC-AGI Phoenix Core başlatıldı")
+    except Exception as e:
+        logger.error(f"Phoenix Core başlatma hatası: {e}")
+        PHOENIX_AVAILABLE = False
+
+# API Router'larını ekle
+if PHOENIX_AVAILABLE:
+    app.include_router(agi_router, prefix="/api/v1")
+
+# Request modelleri
 class ChatRequest(BaseModel):
-    query: str
-    language: str = "en"
-    session_id: Optional[str] = None
+    message: str
+    session_id: str = "default"
 
-class ImageRequest(BaseModel):
+class GenerateImageRequest(BaseModel):
     prompt: str
+    size: str = "256x256"
 
+# API Endpoints
 @app.get("/")
-def root():
-    return {"status": "TC-AGI Backend Running!", "version": "8.0", "ai": "Llama-3 8B + RAG + Web", "knowledge_entries": len(memory.knowledge_base)}
+async def root():
+    status = "TC-AGI Phoenix Core Aktif" if PHOENIX_AVAILABLE else "TC-AGI Phoenix Core Kullanılamıyor"
+    return {
+        "message": f"TC-AGI Phoenix API - {status}",
+        "version": "2.0.0",
+        "phoenix_available": PHOENIX_AVAILABLE
+    }
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy", 
+        "environment": "production",
+        "phoenix_core": "active" if PHOENIX_AVAILABLE else "inactive"
+    }
 
 @app.post("/api/v1/chat")
-def chat(request: ChatRequest):
-    session_id = request.session_id or str(uuid.uuid4())
-    if session_id not in chat_sessions:
-        chat_sessions[session_id] = []
+async def chat(request: ChatRequest):
+    if not PHOENIX_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Phoenix Core şu anda kullanılamıyor")
     
-    # Check if query needs current info (keywords)
-    current_keywords = ["2024", "2025", "latest", "recent", "current", "today", "now", "who won"]
-    needs_web = any(keyword in request.query.lower() for keyword in current_keywords)
-    
-    relevant_knowledge = memory.search(request.query, k=3)
-    context = ""
-    web_used = False
-    
-    # Use web if: needs current info OR no good memory match
-    if needs_web or not relevant_knowledge or (relevant_knowledge and relevant_knowledge[0]['score'] > 30):
-        print(f"🌐 Web search: {request.query}")
-        web_results = web_searcher.search(request.query, max_results=3)
-        if web_results:
-            web_used = True
-            context = "Web results:\n"
-            for r in web_results:
-                context += f"- {r['title']}: {r['content'][:250]}\n"
-                memory.add_knowledge(f"Web: {r['content'][:400]}", {"source": "web", "url": r['url'], "date": datetime.now().isoformat()})
-    elif relevant_knowledge:
-        context = "Memory:\n" + "\n".join([k['text'][:200] for k in relevant_knowledge[:2]]) + "\n"
-    
-    llama_prompt = f"""<|begin_of_text|><|start_header_id|>system<|end_header_id|>
-You are TC-AGI. Answer accurately. Respond in {request.language}.
-{context}<|eot_id|>
-<|start_header_id|>user<|end_header_id|>
-{request.query}<|eot_id|>
-<|start_header_id|>assistant<|end_header_id|>
-"""
-    
-    ai_response = llama_model.generate(llama_prompt, max_tokens=512, temperature=0.7)
-    if request.language != "en":
-        ai_response = translate_text(ai_response, "en", request.language)
-    
-    memory.add_knowledge(f"Q: {request.query}\nA: {ai_response}", {"timestamp": datetime.now().isoformat()})
-    chat_sessions[session_id].append({"role": "user", "content": request.query})
-    chat_sessions[session_id].append({"role": "assistant", "content": ai_response})
-    
-    return {"response": ai_response, "session_id": session_id, "timestamp": datetime.now().isoformat(), "web_search_used": web_used}
+    try:
+        # Phoenix Core ile işle
+        response = await phoenix_core.process_message(request.message, request.session_id)
+        return {
+            "response": response,
+            "session_id": request.session_id,
+            "timestamp": "2024-01-01T00:00:00Z"  # Gerçek timestamp eklenebilir
+        }
+    except Exception as e:
+        logger.error(f"Chat hatası: {e}")
+        raise HTTPException(status_code=500, detail=f"İşlem hatası: {str(e)}")
 
-@app.post("/api/v1/generate-image")
-def create_image(request: ImageRequest):
-    image_data = generate_image(request.prompt)
-    return {"success": True, "image": image_data} if image_data else {"success": False, "error": "Failed"}
+@app.get("/api/v1/history/{session_id}")
+async def get_history(session_id: str):
+    if not PHOENIX_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Phoenix Core şu anda kullanılamıyor")
+    
+    try:
+        # Geçmişi getir (basit implementasyon)
+        return {
+            "session_id": session_id,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": "TC-AGI Phoenix Core aktif",
+                    "timestamp": "2024-01-01T00:00:00Z"
+                }
+            ]
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Geçmiş getirme hatası: {str(e)}")
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)

@@ -9,11 +9,11 @@ feedparser==6.0.10
 lxml_html_clean==0.4.3
 python-multipart==0.0.6
 transformers==4.35.2
-torch==2.1.2
+torch==2.4.1
 sentencepiece==0.1.99
 accelerate==0.24.1
 llama-cpp-python==0.2.56
-faiss-cpu==1.7.4
+faiss-cpu==1.8.0
 sentence-transformers==2.2.2
 duckduckgo-search==3.9.6
 deep-translator==1.11.4
